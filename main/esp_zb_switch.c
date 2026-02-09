@@ -5,7 +5,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
-#include "led_strip.h" // Додано для керування адресним світлодіодом
+#include "led_strip.h"
 #include "ha/esp_zigbee_ha_standard.h"
 #include "zcl_utility.h"
 #include "esp_zb_switch.h"
@@ -58,8 +58,6 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
             if (set_attr_msg->attribute.data.value) {
                 bool light_state = *(bool *)set_attr_msg->attribute.data.value;
                 ESP_LOGI(TAG, "Zigbee command: LED is now %s", light_state ? "ON" : "OFF");
-                
-                /* Викликаємо функцію для адресного LED */
                 set_led_state(light_state);
             }
         }
@@ -94,6 +92,7 @@ static void zb_buttons_handler(switch_func_pair_t *button_func_pair)
                                        &new_state, false);
             
             ESP_LOGI(TAG, "Physical button toggle: %d -> %d", current_state, new_state);
+            set_led_state(new_state);
         }
     }
 }
@@ -105,6 +104,9 @@ static esp_err_t deferred_driver_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief Обробник сигналів Zigbee стеку
+ */
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
     uint32_t *p_sg_p       = signal_struct->p_app_signal;
@@ -120,9 +122,16 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
         if (err_status == ESP_OK) {
             ESP_LOGI(TAG, "Device started up %s", esp_zb_bdb_is_factory_new() ? "factory-new" : "rejoined");
-            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+            if (esp_zb_bdb_is_factory_new()) {
+                esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+            }
         } else {
-            esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+            ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s)", esp_err_to_name(err_status));
+            /* Якщо ініціалізація не вдалася (наприклад, через NVS), спробуємо повний скид */
+            if (err_status == ESP_FAIL) {
+                ESP_LOGE(TAG, "Critical stack failure, performing factory reset...");
+                esp_zb_factory_reset();
+            }
         }
         break;
     case ESP_ZB_BDB_SIGNAL_STEERING:
@@ -131,11 +140,22 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      esp_zb_get_pan_id(), esp_zb_get_short_address());
             deferred_driver_init();
         } else {
+            ESP_LOGI(TAG, "Network steering was not successful (status: %s), retrying...", esp_err_to_name(err_status));
             vTaskDelay(pdMS_TO_TICKS(1000));
             esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
         }
         break;
+    
+    case ESP_ZB_ZDO_SIGNAL_LEAVE:
+        if (err_status == ESP_OK) {
+            ESP_LOGW(TAG, "Device received Leave Request from Coordinator");
+            ESP_LOGI(TAG, "Resetting to factory new state and restarting...");
+            esp_zb_factory_reset(); 
+        }
+        break;
+
     default:
+        ESP_LOGI(TAG, "ZDO signal: 0x%x, status: %s", sig_type, esp_err_to_name(err_status));
         break;
     }
 }
@@ -152,7 +172,6 @@ static void esp_zb_task(void *pvParameters)
     };
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
     
-    /* Очистка при старті */
     led_strip_clear(led_strip);
     led_strip_refresh(led_strip);
     ESP_LOGI(TAG, "LED Strip initialized on GPIO %d", LED_PIN);
@@ -191,7 +210,17 @@ void app_main(void)
         .radio_config = ESP_ZB_DEFAULT_RADIO_CONFIG(),
         .host_config = ESP_ZB_DEFAULT_HOST_CONFIG(),
     };
-    ESP_ERROR_CHECK(nvs_flash_init());
+
+    /* НАДІЙНА ІНІЦІАЛІЗАЦІЯ NVS */
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
     ESP_ERROR_CHECK(esp_zb_platform_config(&config));
-    xTaskCreate(esp_zb_task, "Zigbee_main", 4096, NULL, 5, NULL);
+    
+    /* ЗБІЛЬШЕНО СТЕК ДО 8192 */
+    xTaskCreate(esp_zb_task, "Zigbee_main", 8192, NULL, 5, NULL);
 }

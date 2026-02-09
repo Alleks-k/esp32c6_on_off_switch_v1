@@ -1,0 +1,45 @@
+# ESP-IDF Build Artifacts
+build/
+sdkconfig.old
+sdkconfig.temp
+managed_components/
+dependencies.lock
+
+# Log and temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# Python (helper scripts and tools)
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# VS Code settings
+.vscode/
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+
+# Tooling related
+.cache/
+.clangd/
+compile_commands.json
+
+# Web UI artifacts 
+node_modules/
+dist/
+.eslintcache
+
+# OS specific files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Project specific security
+main/wifi_credentials.h
